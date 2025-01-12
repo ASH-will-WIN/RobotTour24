@@ -1,84 +1,52 @@
 #include <Math.h>
-#include <AccelStepper.h>
 
+#define DIR_PIN_LEFT   2    // Direction pin for left motor
+#define STEP_PIN_LEFT  3    // Step pin for left motor
 
-// Left is pin1 side from Northview code
-// Right is pin2 side from Northview code
-#define DIR_PIN_LEFT         2      
-#define STEP_PIN_LEFT         3      
+#define DIR_PIN_RIGHT  4    // Direction pin for right motor
+#define STEP_PIN_RIGHT 5    // Step pin for right motor
 
-#define DIR_PIN_RIGHT         4
-#define STEP_PIN_RIGHT        5
-
-
-// For 1/16th microstepping
 #define MS1 6
 #define MS2 7
 #define MS3 8
 
-
-
-
-AccelStepper leftMotor(AccelStepper::DRIVER, STEP_PIN_LEFT, DIR_PIN_LEFT);
-AccelStepper rightMotor(AccelStepper::DRIVER, STEP_PIN_RIGHT, DIR_PIN_RIGHT);
-
-long previousTime = millis();
-
 struct Point {
-  double x;  // x-coordinate
-  double y;  // y-coordinate
+  double x;
+  double y;
 };
 
-double lookaheadDistance = 10;
-double baseSpeed = 500;
-double maxSpeed = 2000;
+double lookaheadDistance = 200;
+double baseSpeed = 10000;  // Base speed in steps per second
 double scaleFactor = 1;
 
-double currentLeftSteps = 0;
-double currentRightSteps = 0;
-double previousLeftSteps = 0;
-double previousRightSteps = 0;
+double leftSpeed = 0;
+double rightSpeed = 0;
 
-
-double rightSpeed;
-double leftSpeed;
-
-
-
-double WHEELBASE = 15.875;
-double WHEEL_RADIUS = 4.0132;
+double WHEELBASE = 15.875;  // Distance between wheels in cm
+double WHEEL_RADIUS = 4.0132;  // Wheel radius in cm
 double WHEEL_CIRCUMFERENCE = 2 * PI * WHEEL_RADIUS;
-double STEPS_PER_REV = 200 * 16;  // 16 is the 1/16 microstepping
-double dStep = WHEEL_CIRCUMFERENCE/STEPS_PER_REV;
+double STEPS_PER_REV = 200 * 16;  // 16 microsteps per step
+double dStep = WHEEL_CIRCUMFERENCE / STEPS_PER_REV;
 double totalDistance = 0;
-
 
 double initialHeading = 0;
 double currentHeading = initialHeading;
 Point initialPos = {0, 0};
 Point currentPos = {0, 0};
-Point desiredPositions[5] = {{0, 0},
-                                 {0, 10},
-                                 {0, 20},
-                                 {0, 30},
-                                 {0, 40}};
+Point desiredPositions[5] = {{0, 0}, {0, 10}, {0, 20}, {0, 30}, {0, 40}};
 
-
-
-
+// Timing variables
+unsigned long previousTime = 0;
 
 void setup() {
-  // Initialize hardware serial for debugging
   Serial.begin(115200);
 
-
-  // Set pin modes for both motors
+  // Set motor pin modes
   pinMode(DIR_PIN_LEFT, OUTPUT);
-  pinMode(DIR_PIN_RIGHT, OUTPUT);
-
   pinMode(STEP_PIN_LEFT, OUTPUT);
-  pinMode(STEP_PIN_RIGHT, OUTPUT);
 
+  pinMode(DIR_PIN_RIGHT, OUTPUT);
+  pinMode(STEP_PIN_RIGHT, OUTPUT);
 
 
   // Microstepping pins:
@@ -89,140 +57,135 @@ void setup() {
   digitalWrite(MS1, HIGH);
   digitalWrite(MS2, HIGH);
   digitalWrite(MS3, HIGH);
-
-  rightMotor.setSpeed(50);
-  leftMotor.setSpeed(50);
-  rightMotor.setAcceleration(50);
-  leftMotor.setAcceleration(50);
-  rightMotor.moveTo(500);
-  leftMotor.moveTo(500);
-  rightMotor.run();
-  leftMotor.run();
 }
-
 
 void loop() {
-
   updateValues();
 
-  adjustMotorSpeeds(calculateCurvature(findLookaheadPoint()));
+  // Calculate curvature and adjust motor speeds
+  double curvature = calculateCurvature(findLookaheadPoint());
+  adjustMotorSpeeds(curvature);
 
-  leftMotor.setSpeed(constrain(leftSpeed, 0, maxSpeed));
-  rightMotor.setSpeed(constrain(rightSpeed, 0, maxSpeed));
+  // Move the motors at the calculated speeds
+  moveMotor(STEP_PIN_LEFT, DIR_PIN_LEFT, leftSpeed);
+  moveMotor(STEP_PIN_RIGHT, DIR_PIN_RIGHT, rightSpeed);
 
-
-  if(isPathComplete(desiredPositions[4], 3)) {
-    leftMotor.stop();
-    rightMotor.stop();
-
-    while(true){}
+  // Stop the motors if path is complete
+  if (isPathComplete(desiredPositions[4], 3)) {
+    Serial.println("Path complete!");
+    while (true); // Stop execution
   }
+}
 
-  leftMotor.run();
-  rightMotor.run();
+// Move a motor based on speed
+void moveMotor(int stepPin, int dirPin, double speed) {
+  static unsigned long lastStepTimeLeft = 0;
+  static unsigned long lastStepTimeRight = 0;
 
-  // Serial.print("LStepsTotal: "); Serial.print(leftMotor.currentPosition()); 
-  // Serial.print("    RStepsTotal: "); Serial.print(rightMotor.currentPosition());
-  // Serial.print("    Heading: "); Serial.print(currentHeading);
-  // Serial.print("    XPos: "); Serial.print(currentPos.x); Serial.print("  YPos: "); Serial.println(currentPos.y);
-  // Serial.println(" ");
+  unsigned long &lastStepTime = (stepPin == STEP_PIN_LEFT) ? lastStepTimeLeft : lastStepTimeRight;
+  unsigned long stepInterval = 1000000.0 / abs(speed); // Step interval in microseconds
 
-  if (millis() - previousTime >= 100) {
-        Serial.print("LStepsTotal: "); Serial.print(leftMotor.currentPosition());
-        Serial.print("    RStepsTotal: "); Serial.print(rightMotor.currentPosition());
-        Serial.print("    Heading: "); Serial.print(currentHeading);
-        Serial.print("    XPos: "); Serial.print(currentPos.x); Serial.print("  YPos: "); Serial.println(currentPos.y);
-        previousTime = millis();
+  if (micros() - lastStepTime >= stepInterval) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(2); // Minimum pulse width for your motor driver
+    digitalWrite(stepPin, LOW);
+    lastStepTime = micros();
   }
 }
 
 
+// Update robot state (position, heading, etc.)
+void updateValues() {
+  unsigned long currentTime = millis();
+  double deltaTime = (currentTime - previousTime) / 1000.0; // Time in seconds
+  previousTime = currentTime;
 
-void updateHeading() {
-  double deltaSteps = currentLeftSteps - currentRightSteps;
-  double deltaHeading = (deltaSteps * dStep)/WHEELBASE;
+  double leftDistance = leftSpeed * deltaTime * dStep;
+  double rightDistance = rightSpeed * deltaTime * dStep;
+
+  double deltaHeading = (leftDistance - rightDistance) / WHEELBASE;
   currentHeading += deltaHeading;
 
-  currentHeading = fmod(currentHeading, 2 * PI);
-  if (currentHeading < 0) {
-    currentHeading += 2 * PI;
-  }
+  double avgDistance = (leftDistance + rightDistance) / 2;
+  currentPos.x += avgDistance * cos(currentHeading);
+  currentPos.y += avgDistance * sin(currentHeading);
+
+  // Log current pose
+  Serial.print("Current Position: (");
+  Serial.print(currentPos.x);
+  Serial.print(", ");
+  Serial.print(currentPos.y);
+  Serial.print(")  Heading: ");
+  Serial.println(currentHeading * (180.0 / PI)); // Convert radians to degrees
 }
 
 
-void updateDistanceAndPos() {
-  double avgDeltaSteps = ((currentLeftSteps - previousLeftSteps) + (currentRightSteps - previousRightSteps))/2;
-  double deltaDistance = avgDeltaSteps * dStep;
-  
-  totalDistance += deltaDistance;
-  currentPos.x += deltaDistance * cos(currentHeading);
-  currentPos.y += deltaDistance * sin(currentHeading);
-}
 
-void updateStepCounts(){
-  previousLeftSteps = currentLeftSteps;
-  previousRightSteps = currentRightSteps;
-
-  currentLeftSteps = leftMotor.currentPosition();
-  currentRightSteps = rightMotor.currentPosition();
-}
-
-void updateValues(){
-  updateStepCounts();
-  updateHeading();
-  updateDistanceAndPos();
-}
-
-Point findLookaheadPoint(){
-  for (int i = 0; i < (sizeof(desiredPositions)/sizeof(desiredPositions[0])) - 1; i++){
+// Find the next lookahead point
+Point findLookaheadPoint() {
+  for (int i = 0; i < (sizeof(desiredPositions) / sizeof(desiredPositions[0])) - 1; i++) {
     double dx = desiredPositions[i + 1].x - currentPos.x;
     double dy = desiredPositions[i + 1].y - currentPos.y;
-    double distance = sqrt(dx*dx + dy*dy);
+    double distance = sqrt(dx * dx + dy * dy);
 
     if (distance >= lookaheadDistance) {
+      Serial.print("Lookahead Point: (");
+      Serial.print(desiredPositions[i + 1].x);
+      Serial.print(", ");
+      Serial.print(desiredPositions[i + 1].y);
+      Serial.print(")  ");
       return desiredPositions[i + 1];
     }
   }
 
-  return desiredPositions[(sizeof(desiredPositions)/sizeof(desiredPositions[0])) - 1];
+  return desiredPositions[(sizeof(desiredPositions) / sizeof(desiredPositions[0])) - 1];
 }
 
-
+// Calculate curvature based on lookahead point
 double calculateCurvature(Point lookaheadPoint) {
   double dx = lookaheadPoint.x - currentPos.x;
   double dy = lookaheadPoint.y - currentPos.y;
   double angleToLookahead = atan2(dy, dx);
   double alpha = angleToLookahead - currentHeading;
 
-  double distance = sqrt(dx*dx + dy*dy);
-  double curve = (2 * sin(alpha))/distance;
-  return curve;
+  double distance = sqrt(dx * dx + dy * dy);
+  double curvature = (2 * sin(alpha)) / distance;
+
+  // Log curvature
+  Serial.print("Curvature: ");
+  Serial.print(curvature);
+  Serial.print("     ");
+
+  return curvature;
 }
 
+// Adjust motor speeds based on curvature
+void adjustMotorSpeeds(double curvature) {
+  double leftMSpeed = baseSpeed * (1 - curvature);
+  double rightMSpeed = baseSpeed * (1 + curvature);
 
-void adjustMotorSpeeds(double k) {
-  double leftMSpeed = baseSpeed * (1 - k * WHEELBASE/2);
-  double rightMSpeed = baseSpeed * (1 + k * WHEELBASE/2);
-  
-  leftSpeed = constrain(leftMSpeed, 0, maxSpeed);
-  rightSpeed = constrain(rightMSpeed, 0, maxSpeed);
+  leftSpeed = constrain(leftMSpeed, 0, 16000);
+  rightSpeed = constrain(rightMSpeed, 0, 16000);
+
+  // Log motor speeds
+  Serial.print("Left Speed: ");
+  Serial.print(leftSpeed);
+  Serial.print("     ");
+
+  Serial.print("Right Speed: ");
+  Serial.print(rightSpeed);
+  Serial.print("     ");
 }
 
-
-
+// Check if the path is complete
 bool isPathComplete(Point targetPos, double threshold) {
   double dx = targetPos.x - currentPos.x;
   double dy = targetPos.y - currentPos.y;
-  double distance = sqrt(dx * dx + dy * dy);
-  return distance <= threshold;
-}
+  bool complete = sqrt(dx * dx + dy * dy) <= threshold;
 
+  if (complete) {
+    Serial.println("Reached target position.");
+  }
 
-double millisToSeconds(double ms) {
-  return ms/1000.0000;
-}
-
-
-double secondsToMillis(double s) {
-  return s * 1000.0000;
+  return complete;
 }
